@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -36,6 +37,12 @@ impl Default for ForgeConfig {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct KeybindingsConfig {
+    pub normal: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct AppConfig {
     pub theme: Option<String>,
     pub theme_dark: Option<String>,
@@ -69,6 +76,8 @@ pub struct AppConfig {
     /// `[forge]` section settings. Always present; `None` means "no override"
     /// and downstream code should treat it as `ForgeConfig::default()`.
     pub forge: Option<ForgeConfig>,
+    /// `[keybindings.normal]` overrides for normal-mode single-key bindings.
+    pub keybindings: Option<KeybindingsConfig>,
 }
 
 /// Known top-level config keys. Used to warn about typos.
@@ -95,9 +104,11 @@ const KNOWN_KEYS: &[&str] = &[
     "single_file_view",
     "username",
     "forge",
+    "keybindings",
 ];
 
 const FORGE_KNOWN_KEYS: &[&str] = &["comment_type_prefix"];
+const KEYBINDINGS_KNOWN_KEYS: &[&str] = &["normal"];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigLoadOutcome {
@@ -342,6 +353,9 @@ fn load_config_from_path(path: &Path) -> Result<ConfigLoadOutcome> {
         forge: table
             .get("forge")
             .and_then(|v| parse_forge(v, &mut warnings)),
+        keybindings: table
+            .get("keybindings")
+            .and_then(|v| parse_keybindings(v, &mut warnings)),
     };
 
     for key in table.keys() {
@@ -354,6 +368,69 @@ fn load_config_from_path(path: &Path) -> Result<ConfigLoadOutcome> {
         config: Some(config),
         warnings,
     })
+}
+
+fn parse_keybindings(value: &Value, warnings: &mut Vec<String>) -> Option<KeybindingsConfig> {
+    let Some(table) = value.as_table() else {
+        warnings
+            .push("Warning: Config key 'keybindings' must be a table; ignoring value".to_string());
+        return None;
+    };
+
+    for key in table.keys() {
+        if !KEYBINDINGS_KNOWN_KEYS.contains(&key.as_str()) {
+            warnings.push(format!(
+                "Warning: Unknown config key 'keybindings.{key}', ignoring"
+            ));
+        }
+    }
+
+    let normal = table
+        .get("normal")
+        .and_then(|v| parse_keybinding_table(v, "keybindings.normal", warnings));
+
+    if normal.is_some() {
+        Some(KeybindingsConfig { normal })
+    } else {
+        None
+    }
+}
+
+fn parse_keybinding_table(
+    value: &Value,
+    table_name: &str,
+    warnings: &mut Vec<String>,
+) -> Option<HashMap<String, String>> {
+    let Some(table) = value.as_table() else {
+        warnings.push(format!(
+            "Warning: Config key '{table_name}' must be a table; ignoring value"
+        ));
+        return None;
+    };
+
+    let mut bindings = HashMap::new();
+    for (key, value) in table {
+        let Some(action) = value.as_str() else {
+            warnings.push(format!(
+                "Warning: Config key '{table_name}.{key}' must be a string; ignoring binding"
+            ));
+            continue;
+        };
+        let action = action.trim();
+        if action.is_empty() {
+            warnings.push(format!(
+                "Warning: Config key '{table_name}.{key}' cannot be empty; ignoring binding"
+            ));
+            continue;
+        }
+        bindings.insert(key.to_string(), action.to_string());
+    }
+
+    if bindings.is_empty() {
+        None
+    } else {
+        Some(bindings)
+    }
 }
 
 /// Parse the `[forge]` section, returning `Some` with overridden values when
@@ -681,6 +758,73 @@ mod tests {
             vec![
                 "Warning: Config key 'startup_commands' must be an array of strings; ignoring value"
             ]
+        );
+    }
+
+    #[test]
+    fn should_parse_normal_keybindings() {
+        let outcome = parse_config(
+            r#"[keybindings.normal]
+r = "toggle_reviewed_then_next_file"
+R = "toggle_hunk_reviewed_then_next_hunk"
+"#,
+        );
+        let normal = outcome
+            .config
+            .as_ref()
+            .and_then(|cfg| cfg.keybindings.as_ref())
+            .and_then(|cfg| cfg.normal.as_ref())
+            .expect("normal keybindings should parse");
+        assert_eq!(
+            normal.get("r").map(String::as_str),
+            Some("toggle_reviewed_then_next_file")
+        );
+        assert_eq!(
+            normal.get("R").map(String::as_str),
+            Some("toggle_hunk_reviewed_then_next_hunk")
+        );
+        assert!(outcome.warnings.is_empty());
+    }
+
+    #[test]
+    fn should_warn_and_ignore_invalid_keybinding_values() {
+        let outcome = parse_config(
+            r#"[keybindings]
+unknown = true
+
+[keybindings.normal]
+r = 12
+R = ""
+c = "add_line_comment"
+"#,
+        );
+        let normal = outcome
+            .config
+            .as_ref()
+            .and_then(|cfg| cfg.keybindings.as_ref())
+            .and_then(|cfg| cfg.normal.as_ref())
+            .expect("valid normal binding should remain");
+        assert_eq!(
+            normal.get("c").map(String::as_str),
+            Some("add_line_comment")
+        );
+        assert_eq!(outcome.warnings.len(), 3);
+        assert!(
+            outcome.warnings.contains(
+                &"Warning: Unknown config key 'keybindings.unknown', ignoring".to_string()
+            )
+        );
+        assert!(
+            outcome.warnings.contains(
+                &"Warning: Config key 'keybindings.normal.R' cannot be empty; ignoring binding"
+                    .to_string()
+            )
+        );
+        assert!(
+            outcome.warnings.contains(
+                &"Warning: Config key 'keybindings.normal.r' must be a string; ignoring binding"
+                    .to_string()
+            )
         );
     }
 

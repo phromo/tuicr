@@ -3,6 +3,8 @@
 Full reference. Press `?` inside tuicr for an in-app version of this list.
 
 `<leader>` defaults to `;`. Override it with `leader = ","` in `~/.config/tuicr/config.toml`.
+Normal-mode single-key bindings can be overridden with `[keybindings.normal]`; see
+[`docs/CONFIG.md`](CONFIG.md#keybindings).
 
 ## Navigation
 

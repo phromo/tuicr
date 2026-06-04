@@ -200,11 +200,18 @@ leader = ";"                  # configurable prefix for leader shortcuts
 review_watch_interval_ms = 1000 # set to 0 to disable persisted-review polling
 startup_commands = ["set nocommits"] # run safe :commands after startup
 
+[keybindings.normal]
+r = "toggle_reviewed_then_next_file"
+R = "toggle_hunk_reviewed_then_next_hunk"
+
 [[comment_types]]
 id = "issue"
 color = "red"
 definition = "must fix before merge"
 ```
+
+Normal-mode keybinding actions include `toggle_reviewed`, `toggle_hunk_reviewed`,
+`toggle_reviewed_then_next_file`, and `toggle_hunk_reviewed_then_next_hunk`.
 
 Bundled themes: `dark`, `light`, `ayu-light`, `ayu-mirage`, `onedark`, `github-light`,
 `github-dark`, `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`,
@@ -219,7 +226,7 @@ on Windows. Local themes may reference a local `syntax_theme = "my-syntax.tmThem
 syntax highlighting. A ready-to-copy example lives at [`examples/tuicr-teal.toml`](examples/tuicr-teal.toml)
 with its matching [`examples/tuicr-teal-syntax.tmTheme`](examples/tuicr-teal-syntax.tmTheme) syntax theme.
 
-Full options, theme resolution precedence, `comment_types` semantics, and `.tuicrignore` rules in
+Full options, keybinding overrides, theme resolution precedence, `comment_types` semantics, and `.tuicrignore` rules in
 [docs/CONFIG.md](docs/CONFIG.md).
 
 ## Keybindings

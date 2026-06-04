@@ -19,7 +19,7 @@ use tuicr::handler::{
     handle_search_action, handle_submit_action_picker_action, handle_submit_confirm_action,
     handle_submit_resolver_action, handle_visual_action,
 };
-use tuicr::input::{Action, map_key_to_action, map_target_filter_mode};
+use tuicr::input::{Action, NormalKeymap, map_key_to_action_with_keymap, map_target_filter_mode};
 use tuicr::terminal_state::{TerminalFeatures, TerminalSession};
 use tuicr::theme::resolve_theme_with_config;
 use tuicr::vcs::{DiffWhitespaceMode, GitBackendPreference};
@@ -175,6 +175,10 @@ fn main() -> anyhow::Result<()> {
             app.supports_keyboard_enhancement = keyboard_enhancement_supported;
             startup_warnings.extend(app.vcs.startup_warnings());
             if let Some(cfg) = config_outcome.config.as_ref() {
+                let (normal_keymap, keymap_warnings) =
+                    NormalKeymap::from_config(cfg.keybindings.as_ref());
+                app.normal_keymap = normal_keymap;
+                startup_warnings.extend(keymap_warnings);
                 if let Some(forge_cfg) = cfg.forge.clone() {
                     app.forge_config = forge_cfg;
                 }
@@ -534,7 +538,12 @@ fn main() -> anyhow::Result<()> {
                         if app.input_mode == InputMode::CommitSelect && app.pr_filter_editing() {
                             map_target_filter_mode(key)
                         } else {
-                            map_key_to_action(key, app.input_mode, app.leader_key)
+                            map_key_to_action_with_keymap(
+                                key,
+                                app.input_mode,
+                                app.leader_key,
+                                &app.normal_keymap,
+                            )
                         };
 
                     // Handle pending command setters (these work in any mode)

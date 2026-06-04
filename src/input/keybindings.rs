@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::InputMode;
+use crate::config::KeybindingsConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -36,6 +39,10 @@ pub enum Action {
     // Review actions
     ToggleReviewed,
     ToggleHunkReviewed,
+    ToggleReviewedThenNextFile,
+    ToggleReviewedThenPrevFile,
+    ToggleHunkReviewedThenNextHunk,
+    ToggleHunkReviewedThenPrevHunk,
     AddLineComment,
     AddFileComment,
     EditComment,
@@ -134,9 +141,91 @@ pub enum Action {
     None,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NormalKeymap {
+    bindings: HashMap<char, Action>,
+}
+
+impl NormalKeymap {
+    pub fn from_config(config: Option<&KeybindingsConfig>) -> (Self, Vec<String>) {
+        let mut keymap = Self::default();
+        let mut warnings = Vec::new();
+        let Some(normal) = config.and_then(|cfg| cfg.normal.as_ref()) else {
+            return (keymap, warnings);
+        };
+
+        for (raw_key, raw_action) in normal {
+            let Some(key) = parse_single_char_key(raw_key) else {
+                warnings.push(format!(
+                    "Warning: Config key 'keybindings.normal.{raw_key}' must be a single character; ignoring binding"
+                ));
+                continue;
+            };
+            let Some(action) = parse_named_action(raw_action) else {
+                warnings.push(format!(
+                    "Warning: Config key 'keybindings.normal.{raw_key}' has unknown action \"{raw_action}\"; ignoring binding"
+                ));
+                continue;
+            };
+            keymap.bindings.insert(key, action);
+        }
+
+        (keymap, warnings)
+    }
+
+    fn action_for_key(&self, key: KeyEvent) -> Option<Action> {
+        if !matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
+            return None;
+        }
+        let KeyCode::Char(c) = key.code else {
+            return None;
+        };
+        self.bindings.get(&c).cloned()
+    }
+}
+
+fn parse_single_char_key(raw: &str) -> Option<char> {
+    let mut chars = raw.chars();
+    match (chars.next(), chars.next()) {
+        (Some(key), None) => Some(key),
+        _ => None,
+    }
+}
+
+fn parse_named_action(raw: &str) -> Option<Action> {
+    let normalized = raw.trim().replace('-', "_").to_ascii_lowercase();
+    Some(match normalized.as_str() {
+        "toggle_reviewed" => Action::ToggleReviewed,
+        "toggle_hunk_reviewed" => Action::ToggleHunkReviewed,
+        "toggle_reviewed_then_next_file" => Action::ToggleReviewedThenNextFile,
+        "toggle_reviewed_then_prev_file" => Action::ToggleReviewedThenPrevFile,
+        "toggle_hunk_reviewed_then_next_hunk" => Action::ToggleHunkReviewedThenNextHunk,
+        "toggle_hunk_reviewed_then_prev_hunk" => Action::ToggleHunkReviewedThenPrevHunk,
+        "next_file" => Action::NextFile,
+        "prev_file" => Action::PrevFile,
+        "next_hunk" => Action::NextHunk,
+        "prev_hunk" => Action::PrevHunk,
+        "add_line_comment" => Action::AddLineComment,
+        "add_file_comment" => Action::AddFileComment,
+        "edit_comment" => Action::EditComment,
+        "search_next" => Action::SearchNext,
+        "search_prev" => Action::SearchPrev,
+        _ => return None,
+    })
+}
+
 pub fn map_key_to_action(key: KeyEvent, mode: InputMode, leader_key: char) -> Action {
+    map_key_to_action_with_keymap(key, mode, leader_key, &NormalKeymap::default())
+}
+
+pub fn map_key_to_action_with_keymap(
+    key: KeyEvent,
+    mode: InputMode,
+    leader_key: char,
+    normal_keymap: &NormalKeymap,
+) -> Action {
     match mode {
-        InputMode::Normal => map_normal_mode(key, leader_key),
+        InputMode::Normal => map_normal_mode_with_keymap(key, leader_key, normal_keymap),
         InputMode::Command => map_command_mode(key),
         InputMode::Search => map_search_mode(key),
         InputMode::Comment => map_comment_mode(key),
@@ -150,12 +239,27 @@ pub fn map_key_to_action(key: KeyEvent, mode: InputMode, leader_key: char) -> Ac
     }
 }
 
+#[cfg(test)]
 fn map_normal_mode(key: KeyEvent, leader_key: char) -> Action {
-    match (key.code, key.modifiers) {
-        (KeyCode::Char(key), KeyModifiers::NONE) if key == leader_key => {
-            Action::PendingLeaderCommand
-        }
+    map_normal_mode_with_keymap(key, leader_key, &NormalKeymap::default())
+}
 
+fn map_normal_mode_with_keymap(
+    key: KeyEvent,
+    leader_key: char,
+    normal_keymap: &NormalKeymap,
+) -> Action {
+    if let (KeyCode::Char(key), KeyModifiers::NONE) = (key.code, key.modifiers)
+        && key == leader_key
+    {
+        return Action::PendingLeaderCommand;
+    }
+
+    if let Some(action) = normal_keymap.action_for_key(key) {
+        return action;
+    }
+
+    match (key.code, key.modifiers) {
         // Cursor movement (vim-like: cursor moves, scroll follows when needed)
         (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => Action::CursorDown(1),
         (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::CursorUp(1),
@@ -430,8 +534,9 @@ fn map_visual_mode(key: KeyEvent) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DEFAULT_LEADER_KEY;
+    use crate::config::{DEFAULT_LEADER_KEY, KeybindingsConfig};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::collections::HashMap;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -485,6 +590,87 @@ mod tests {
     fn should_map_uppercase_r_to_toggle_hunk_reviewed_in_normal_mode() {
         let action = map_normal_mode(key_shift('R'), DEFAULT_LEADER_KEY);
         assert_eq!(action, Action::ToggleHunkReviewed);
+    }
+
+    #[test]
+    fn should_use_configured_normal_keymap_over_default_binding() {
+        let config = KeybindingsConfig {
+            normal: Some(HashMap::from([
+                (
+                    "r".to_string(),
+                    "toggle_reviewed_then_next_file".to_string(),
+                ),
+                (
+                    "R".to_string(),
+                    "toggle_hunk_reviewed_then_next_hunk".to_string(),
+                ),
+            ])),
+        };
+        let (keymap, warnings) = NormalKeymap::from_config(Some(&config));
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            map_key_to_action_with_keymap(
+                key(KeyCode::Char('r')),
+                InputMode::Normal,
+                DEFAULT_LEADER_KEY,
+                &keymap,
+            ),
+            Action::ToggleReviewedThenNextFile
+        );
+        assert_eq!(
+            map_key_to_action_with_keymap(
+                key_shift('R'),
+                InputMode::Normal,
+                DEFAULT_LEADER_KEY,
+                &keymap,
+            ),
+            Action::ToggleHunkReviewedThenNextHunk
+        );
+    }
+
+    #[test]
+    fn should_keep_leader_binding_ahead_of_configured_keymap() {
+        let config = KeybindingsConfig {
+            normal: Some(HashMap::from([(";".to_string(), "next_file".to_string())])),
+        };
+        let (keymap, warnings) = NormalKeymap::from_config(Some(&config));
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            map_key_to_action_with_keymap(
+                key(KeyCode::Char(';')),
+                InputMode::Normal,
+                DEFAULT_LEADER_KEY,
+                &keymap,
+            ),
+            Action::PendingLeaderCommand
+        );
+    }
+
+    #[test]
+    fn should_warn_for_invalid_configured_normal_keymap_entries() {
+        let config = KeybindingsConfig {
+            normal: Some(HashMap::from([
+                (
+                    "rr".to_string(),
+                    "toggle_reviewed_then_next_file".to_string(),
+                ),
+                ("r".to_string(), "bogus".to_string()),
+            ])),
+        };
+        let (keymap, warnings) = NormalKeymap::from_config(Some(&config));
+
+        assert_eq!(
+            map_key_to_action_with_keymap(
+                key(KeyCode::Char('r')),
+                InputMode::Normal,
+                DEFAULT_LEADER_KEY,
+                &keymap,
+            ),
+            Action::ToggleReviewed
+        );
+        assert_eq!(warnings.len(), 2);
     }
 
     #[test]

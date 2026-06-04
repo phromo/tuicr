@@ -38,6 +38,10 @@ review_watch_interval_ms = 1000
 
 backend = "libgit2"
 
+[keybindings.normal]
+r = "toggle_reviewed_then_next_file"
+R = "toggle_hunk_reviewed_then_next_hunk"
+
 comment_types = [
   { id = "note", label = "question", definition = "ask for clarification", color = "yellow" },
   { id = "suggestion", definition = "possible improvements" },
@@ -70,7 +74,37 @@ comment_type_prefix = true
 | `no_update_check` | `false` | Skip startup update check when `true`. |
 | `review_watch_interval_ms` | `1000` | Poll interval for persisted review-session changes. Set to `0` to disable automatic local-session reloads. |
 | `backend` | `libgit2` | Git backend: `libgit2` or `cli`. Sparse-checkout repos auto-route to `cli`. |
+| `keybindings.normal` | (none) | Normal-mode single-key overrides. See [Keybindings](#keybindings). |
 | `comment_types` | (built-in) | Comment categories. See [Comment types](#comment-types). |
+
+## Keybindings
+
+Normal-mode single-character keys can be remapped with `[keybindings.normal]`.
+The leader key still takes precedence over a keybinding override.
+
+```toml
+[keybindings.normal]
+r = "toggle_reviewed_then_next_file"
+R = "toggle_hunk_reviewed_then_next_hunk"
+```
+
+Supported action names:
+
+- `toggle_reviewed`
+- `toggle_hunk_reviewed`
+- `toggle_reviewed_then_next_file`
+- `toggle_reviewed_then_prev_file`
+- `toggle_hunk_reviewed_then_next_hunk`
+- `toggle_hunk_reviewed_then_prev_hunk`
+- `next_file`
+- `prev_file`
+- `next_hunk`
+- `prev_hunk`
+- `add_line_comment`
+- `add_file_comment`
+- `edit_comment`
+- `search_next`
+- `search_prev`
 
 ## Themes
 

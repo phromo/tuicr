@@ -1297,6 +1297,20 @@ pub fn handle_file_list_action(app: &mut App, action: Action) {
                 app.set_warning("Select a file to toggle reviewed");
             }
         }
+        action @ (Action::ToggleReviewedThenNextFile | Action::ToggleReviewedThenPrevFile) => {
+            if let Some(FileTreeItem::File { file_idx, .. }) = app.get_selected_tree_item() {
+                let reviewed = app.toggle_reviewed_for_file_idx(file_idx, false);
+                if reviewed == Some(true) {
+                    if action == Action::ToggleReviewedThenNextFile {
+                        app.file_list_down(1);
+                    } else {
+                        app.file_list_up(1);
+                    }
+                }
+            } else {
+                app.set_warning("Select a file to toggle reviewed");
+            }
+        }
         _ => handle_shared_normal_action(app, action),
     }
 }
@@ -1404,8 +1418,32 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
         Action::PrevFile => app.prev_file(),
         Action::NextHunk => app.next_hunk(),
         Action::PrevHunk => app.prev_hunk(),
-        Action::ToggleReviewed => app.toggle_reviewed(),
-        Action::ToggleHunkReviewed => app.toggle_hunk_reviewed(),
+        Action::ToggleReviewed => {
+            app.toggle_reviewed();
+        }
+        Action::ToggleHunkReviewed => {
+            app.toggle_hunk_reviewed();
+        }
+        Action::ToggleReviewedThenNextFile => {
+            if app.toggle_reviewed() == Some(true) {
+                app.next_file();
+            }
+        }
+        Action::ToggleReviewedThenPrevFile => {
+            if app.toggle_reviewed() == Some(true) {
+                app.prev_file();
+            }
+        }
+        Action::ToggleHunkReviewedThenNextHunk => {
+            if app.toggle_hunk_reviewed() == Some(true) {
+                app.next_hunk();
+            }
+        }
+        Action::ToggleHunkReviewedThenPrevHunk => {
+            if app.toggle_hunk_reviewed() == Some(true) {
+                app.prev_hunk();
+            }
+        }
         Action::ToggleFocus => {
             let has_selector = app.has_inline_commit_selector();
             let has_comments = app.has_comment_navigator_items();

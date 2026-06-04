@@ -13,6 +13,7 @@ use crate::error::{Result, TuicrError};
 use crate::forge::context::{ContextProvider, ForgeContextProvider, VcsContextProvider};
 use crate::forge::selector::PullRequestsTab;
 use crate::forge::traits::{ForgeBackend, ForgeRepository};
+use crate::input::NormalKeymap;
 use crate::model::{
     ClearScope, Comment, CommentType, DiffFile, DiffHunk, DiffLine, FileStatus, LineOrigin,
     LineRange, LineSide, ReviewSession, SessionDiffSource,
@@ -1205,6 +1206,7 @@ pub struct App {
     pub up_released_since_arm: bool,
     pub cursor_line_highlight: bool,
     pub leader_key: char,
+    pub normal_keymap: NormalKeymap,
     pub scroll_offset: usize,
     pub file_list_area: Option<ratatui::layout::Rect>,
     pub comment_navigator_area: Option<ratatui::layout::Rect>,
@@ -1985,6 +1987,7 @@ impl App {
             up_released_since_arm: false,
             cursor_line_highlight: true,
             leader_key: crate::config::DEFAULT_LEADER_KEY,
+            normal_keymap: NormalKeymap::default(),
             scroll_offset: 0,
             file_list_area: None,
             comment_navigator_area: None,
@@ -4373,22 +4376,27 @@ impl App {
         self.pending_editor_target = Some(EditorTarget { path, line });
     }
 
-    pub fn toggle_reviewed(&mut self) {
+    pub fn toggle_reviewed(&mut self) -> Option<bool> {
         let file_idx = self.diff_state.current_file_idx;
-        self.toggle_reviewed_for_file_idx(file_idx, true);
+        self.toggle_reviewed_for_file_idx(file_idx, true)
     }
 
-    pub fn toggle_reviewed_for_file_idx(&mut self, file_idx: usize, adjust_cursor: bool) {
+    pub fn toggle_reviewed_for_file_idx(
+        &mut self,
+        file_idx: usize,
+        adjust_cursor: bool,
+    ) -> Option<bool> {
         let Some(path) = self
             .diff_files
             .get(file_idx)
             .map(|file| file.display_path().clone())
         else {
-            return;
+            return None;
         };
 
         if let Some(review) = self.session.get_file_mut(&path) {
             review.reviewed = !review.reviewed;
+            let reviewed = review.reviewed;
             self.dirty = true;
 
             // Update current_file_idx before rebuilding annotations:
@@ -4403,6 +4411,9 @@ impl App {
                 self.diff_state.cursor_line = header_line;
                 self.ensure_cursor_visible();
             }
+            Some(reviewed)
+        } else {
+            None
         }
     }
 
@@ -4461,19 +4472,19 @@ impl App {
             && (hunk_idx == 0 || !self.is_hunk_reviewed(file_idx, hunk_idx - 1))
     }
 
-    pub fn toggle_hunk_reviewed(&mut self) {
+    pub fn toggle_hunk_reviewed(&mut self) -> Option<bool> {
         let Some((file_idx, hunk_idx)) = self.hunk_at_cursor() else {
             self.set_warning("Move cursor to a hunk to toggle reviewed");
-            return;
+            return None;
         };
 
         let Some((path, key)) = self.hunk_review_target(file_idx, hunk_idx) else {
             self.set_warning("Move cursor to a hunk to toggle reviewed");
-            return;
+            return None;
         };
 
         let Some(review) = self.session.get_file_mut(&path) else {
-            return;
+            return None;
         };
 
         let reviewed = review.toggle_hunk_reviewed(key);
@@ -4493,6 +4504,7 @@ impl App {
         } else {
             self.set_message("Hunk marked unreviewed");
         }
+        Some(reviewed)
     }
 
     pub fn file_count(&self) -> usize {
@@ -13198,6 +13210,26 @@ mod expand_gap_tests {
                 hunk_idx: 0
             }
         ));
+    }
+
+    #[test]
+    fn should_return_reviewed_state_from_toggle_reviewed() {
+        let file = make_file_with_hunks("test.rs", vec![make_hunk(1, 3)]);
+        let mut app = build_app_with_files(vec![file], 20);
+
+        assert_eq!(app.toggle_reviewed(), Some(true));
+        assert_eq!(app.toggle_reviewed(), Some(false));
+    }
+
+    #[test]
+    fn should_return_reviewed_state_from_toggle_hunk_reviewed() {
+        let file = make_file_with_hunks("test.rs", vec![make_hunk(1, 3)]);
+        let mut app = build_app_with_files(vec![file], 20);
+        app.diff_state.cursor_line = app.hunk_header_line(0, 0).expect("missing hunk header");
+
+        assert_eq!(app.toggle_hunk_reviewed(), Some(true));
+        app.diff_state.cursor_line = app.hunk_header_line(0, 0).expect("missing hunk header");
+        assert_eq!(app.toggle_hunk_reviewed(), Some(false));
     }
 
     #[test]

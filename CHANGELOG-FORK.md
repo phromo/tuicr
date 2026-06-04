@@ -6,6 +6,28 @@ behavior, touched areas, and migration concerns.
 
 ## Unreleased
 
+### Configurable Normal-Mode Keybindings
+
+- Added `[keybindings.normal]` config support for normal-mode single-character
+  overrides.
+- Added composite review actions:
+  - `toggle_reviewed_then_next_file`
+  - `toggle_reviewed_then_prev_file`
+  - `toggle_hunk_reviewed_then_next_hunk`
+  - `toggle_hunk_reviewed_then_prev_hunk`
+- Composite review actions navigate only when the toggle marks the file/hunk as
+  reviewed. Untoggling leaves the cursor in place.
+- Bound Martin's user config to:
+  - `r = "toggle_reviewed_then_next_file"`
+  - `R = "toggle_hunk_reviewed_then_next_hunk"`
+
+Integration notes:
+- Touched `src/config/mod.rs`, `src/input/keybindings.rs`, `src/input/mod.rs`,
+  `src/app.rs`, `src/handler.rs`, `src/main.rs`, `README.md`,
+  `docs/CONFIG.md`, and `docs/KEYBINDINGS.md`.
+- Watch for upstream changes around config parsing, key dispatch, and review
+  toggle handling.
+
 ### Startup Commands And Async EOF Context Loading
 
 - Added `startup_commands` config support.
