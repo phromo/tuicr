@@ -141,6 +141,19 @@ so collaborative tools can add comments immediately. Empty auto-created session
 files are removed when the TUI exits. `tuicr review list` marks currently open
 TUI sessions with `"active": true`.
 
+For portable review state, pass `--review-file <path.md>` to the TUI and to
+`tuicr review` commands. This opts that invocation into a revdiff-style
+markdown file instead of the built-in user cache:
+
+```bash
+tuicr --review-file review.md
+tuicr review add --review-file review.md --session review.md "Check this"
+tuicr review comments --review-file review.md --session review.md
+```
+
+The markdown file contains human-readable comment records plus hidden tuicr
+state needed to restore PR/session metadata losslessly.
+
 ## Library API
 
 tuicr also exposes a Rust library API for tools that want to build on top of its

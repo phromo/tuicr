@@ -5,12 +5,14 @@ use chrono::{DateTime, Utc};
 use crate::error::{Result, TuicrError};
 use crate::model::{Comment, CommentType, LineRange, LineSide, ReviewSession};
 use crate::persistence::manifest::{ManifestEntry, ManifestKind};
+use crate::persistence::markdown;
 use crate::persistence::storage;
 
 /// File-backed access to persisted tuicr review sessions.
 #[derive(Debug, Clone, Default)]
 pub struct ReviewStore {
     reviews_dir: Option<PathBuf>,
+    review_file: Option<PathBuf>,
 }
 
 impl ReviewStore {
@@ -24,6 +26,15 @@ impl ReviewStore {
     pub fn with_reviews_dir(reviews_dir: impl Into<PathBuf>) -> Self {
         Self {
             reviews_dir: Some(reviews_dir.into()),
+            review_file: None,
+        }
+    }
+
+    /// Use one markdown review file as the store.
+    pub fn with_review_file(review_file: impl Into<PathBuf>) -> Self {
+        Self {
+            reviews_dir: None,
+            review_file: Some(review_file.into()),
         }
     }
 
@@ -35,6 +46,9 @@ impl ReviewStore {
         &self,
         selector: impl AsRef<Path>,
     ) -> Result<Vec<SessionSummary>> {
+        if let Some(path) = self.review_file.as_ref() {
+            return self.list_markdown_file(path);
+        }
         let reviews_dir = self.reviews_dir()?;
         let entries = storage::list_sessions_for_selector_in_dir(&reviews_dir, selector.as_ref())?;
         let active_paths = storage::active_session_paths_in_dir(&reviews_dir)?;
@@ -47,6 +61,9 @@ impl ReviewStore {
     /// List every persisted session, local and PR, newest first. Backs
     /// `tuicr review list --all` for when the caller does not know the repo.
     pub fn list_all_sessions(&self) -> Result<Vec<SessionSummary>> {
+        if let Some(path) = self.review_file.as_ref() {
+            return self.list_markdown_file(path);
+        }
         let reviews_dir = self.reviews_dir()?;
         let entries = storage::list_all_sessions_in_dir(&reviews_dir)?;
         let active_paths = storage::active_session_paths_in_dir(&reviews_dir)?;
@@ -60,12 +77,23 @@ impl ReviewStore {
     /// (`gh:owner/repo/pr/<n>`). Returns `None` when no PR session is
     /// persisted for that slug.
     pub fn resolve_pr_session(&self, slug: &str) -> Result<Option<SessionRef>> {
+        if let Some(path) = self.review_file.as_ref() {
+            if !path.exists() {
+                return Ok(None);
+            }
+            let session = markdown::load_session(path)?;
+            return Ok((markdown::session_slug(&session).as_deref() == Some(slug))
+                .then(|| SessionRef::from_path(path)));
+        }
         let reviews_dir = self.reviews_dir()?;
         Ok(storage::pr_session_path_in_dir(&reviews_dir, slug)?.map(SessionRef::from_path))
     }
 
     /// Load a persisted review session.
     pub fn get_review(&self, session_ref: &SessionRef) -> Result<ReviewSession> {
+        if self.is_markdown_ref(session_ref) {
+            return markdown::load_session(session_ref.path());
+        }
         storage::load_session(session_ref.path())
     }
 
@@ -75,6 +103,13 @@ impl ReviewStore {
         session_ref: &SessionRef,
         request: AddCommentRequest,
     ) -> Result<Comment> {
+        if self.is_markdown_ref(session_ref) {
+            let mut session = markdown::load_session(session_ref.path())?;
+            let comment = add_comment_to_session(&mut session, request)?;
+            session.updated_at = Utc::now();
+            markdown::save_session(session_ref.path(), &session)?;
+            return Ok(comment);
+        }
         let reviews_dir = self.reviews_dir()?;
         let (_session, comment) =
             storage::update_session_in_dir(session_ref.path(), &reviews_dir, |session| {
@@ -85,8 +120,50 @@ impl ReviewStore {
 
     /// Save a session through this store's storage root.
     pub fn save_review(&self, session: &ReviewSession) -> Result<SessionRef> {
+        if let Some(path) = self.review_file.as_ref() {
+            return markdown::save_session(path, session).map(SessionRef::from_path);
+        }
         let reviews_dir = self.reviews_dir()?;
         storage::save_session_in_dir(session, &reviews_dir).map(SessionRef::from_path)
+    }
+
+    fn is_markdown_ref(&self, session_ref: &SessionRef) -> bool {
+        self.review_file
+            .as_ref()
+            .is_some_and(|path| path == session_ref.path())
+            || session_ref.path().extension().and_then(|s| s.to_str()) == Some("md")
+    }
+
+    fn list_markdown_file(&self, path: &Path) -> Result<Vec<SessionSummary>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let session = markdown::load_session(path)?;
+        let slug = markdown::session_slug(&session).unwrap_or_else(|| path.display().to_string());
+        let kind = if session.pr_session_key.is_some() {
+            SessionKind::Pr
+        } else {
+            SessionKind::Local
+        };
+        Ok(vec![SessionSummary {
+            session_ref: SessionRef::from_path(path),
+            slug,
+            kind,
+            updated_at: session.updated_at,
+            comment_count: session.review_comments.len()
+                + session
+                    .files
+                    .values()
+                    .map(|review| review.comment_count())
+                    .sum::<usize>(),
+            reviewed_count: session.reviewed_count(),
+            file_count: session.files.len(),
+            anchor: session
+                .branch_name
+                .clone()
+                .unwrap_or_else(|| session.base_commit.clone()),
+            active: false,
+        }])
     }
 
     fn reviews_dir(&self) -> Result<PathBuf> {

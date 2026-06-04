@@ -21,6 +21,8 @@ Session arguments accept any of:
 - a PR slug, e.g. `gh:slatedb/slatedb/pr/1745` (PR slugs resolve without `--repo`)
 - an absolute or relative path to a session JSON file (anything ending in
   `.json` or that exists on disk is treated as a direct path)
+- an absolute or relative path to a markdown review file when using
+  `--review-file`
 
 ## Commands
 
@@ -30,6 +32,7 @@ tuicr review list --repo slatedb/slatedb              # all sessions for a forge
 tuicr review list --all                               # every session across all repos
 tuicr review comments --session agavra/tuicr@main/worktree
 tuicr review comments --session gh:slatedb/slatedb/pr/1745
+tuicr review comments --review-file review.md --session review.md
 ```
 
 All `tuicr review` commands emit JSON by default. Timestamps are RFC3339 strings
@@ -59,6 +62,31 @@ tuicr review comments --session gh:slatedb/slatedb/pr/1745
 
 `--repo` for `add` / `comments` is only consulted when resolving a *local*
 slug; PR slugs and JSON paths ignore it.
+
+## Markdown Review Files
+
+Pass `--review-file <path.md>` to use a portable markdown file instead of
+tuicr's built-in per-user cache. The TUI accepts the same flag:
+
+```bash
+tuicr --review-file review.md
+tuicr pr 1745 --review-file pr-1745.md
+```
+
+Review CLI commands use the markdown file directly:
+
+```bash
+tuicr review list --review-file review.md
+tuicr review add --review-file review.md --session review.md \
+  --target-file src/main.rs --line 42 --type issue "Handle this case."
+tuicr review comments --review-file review.md --session review.md
+```
+
+The file is human-readable markdown. Comment records use headings similar to
+revdiff output, for example `## src/main.rs:42 (ISSUE, new)`, followed by the
+comment body. A hidden tuicr state block preserves metadata that does not fit
+cleanly in headings, such as PR identity, comment lifecycle, reviewed hunks,
+and session settings.
 
 ## Add Comments
 

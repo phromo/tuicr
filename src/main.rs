@@ -213,6 +213,13 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
+    if let Some(path) = cli_args.review_file.as_deref()
+        && let Err(e) = app.attach_review_file(path)
+    {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+
     if let Err(e) = app.ensure_ephemeral_session_file() {
         startup_warnings.push(format!("Failed to initialize review session file: {e}"));
     }

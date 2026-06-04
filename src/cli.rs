@@ -34,6 +34,8 @@ pub struct CliArgs {
     pub repo_url: Option<String>,
     /// Non-interactive review session operation.
     pub review_command: Option<ReviewCommand>,
+    /// Markdown review file to use instead of tuicr's default cache.
+    pub review_file: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -127,6 +129,10 @@ struct TuiOptions {
         value_parser = parse_repo_url
     )]
     repo_url: Option<String>,
+
+    /// Markdown review file to load/save for this invocation.
+    #[arg(long = "review-file", value_name = "PATH")]
+    review_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -182,6 +188,10 @@ pub enum ReviewCommand {
         /// List every persisted session (local and PR), ignoring --repo.
         #[arg(long)]
         all: bool,
+
+        /// Markdown review file to list instead of tuicr's default cache.
+        #[arg(long = "review-file", value_name = "PATH")]
+        review_file: Option<PathBuf>,
     },
 
     /// Add a local draft comment to a persisted session.
@@ -199,6 +209,10 @@ pub enum ReviewCommand {
         /// `owner/repo`). PR slugs and JSON paths resolve without it.
         #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
         repo: PathBuf,
+
+        /// Markdown review file to update instead of tuicr's default cache.
+        #[arg(long = "review-file", value_name = "PATH")]
+        review_file: Option<PathBuf>,
 
         /// Comment classification.
         #[arg(long = "type", value_name = "TYPE", default_value = "note", value_parser = non_empty_comment_type)]
@@ -249,6 +263,10 @@ pub enum ReviewCommand {
         /// `owner/repo`). PR slugs and JSON paths resolve without it.
         #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
         repo: PathBuf,
+
+        /// Markdown review file to read instead of tuicr's default cache.
+        #[arg(long = "review-file", value_name = "PATH")]
+        review_file: Option<PathBuf>,
     },
 }
 
@@ -288,6 +306,7 @@ impl From<Cli> for CliArgs {
             pr_target,
             repo_url: options.repo_url,
             review_command,
+            review_file: options.review_file,
         }
     }
 }
@@ -304,6 +323,7 @@ impl TuiOptions {
             || self.file_path.is_some()
             || self.all_files
             || self.repo_url.is_some()
+            || self.review_file.is_some()
     }
 
     fn merge(self, later: TuiOptions) -> Self {
@@ -318,6 +338,7 @@ impl TuiOptions {
             file_path: later.file_path.or(self.file_path),
             all_files: self.all_files || later.all_files,
             repo_url: later.repo_url.or(self.repo_url),
+            review_file: later.review_file.or(self.review_file),
         }
     }
 }
@@ -638,6 +659,13 @@ mod tests {
     }
 
     #[test]
+    fn should_parse_tui_review_file() {
+        let parsed =
+            parse_for_test(&["tuicr", "--review-file", "review.md"]).expect("parse should succeed");
+        assert_eq!(parsed.review_file, Some(PathBuf::from("review.md")));
+    }
+
+    #[test]
     fn should_parse_no_update_check_flag() {
         let parsed = parse_for_test(&["tuicr", "--no-update-check"]).expect("parse should succeed");
         assert!(parsed.no_update_check);
@@ -789,6 +817,7 @@ mod tests {
             Some(ReviewCommand::List {
                 repo: PathBuf::from("/tmp/repo"),
                 all: false,
+                review_file: None,
             })
         );
     }
@@ -802,6 +831,7 @@ mod tests {
             Some(ReviewCommand::List {
                 repo: PathBuf::from("."),
                 all: true,
+                review_file: None,
             })
         );
     }
@@ -815,6 +845,7 @@ mod tests {
             Some(ReviewCommand::List {
                 repo: PathBuf::from("slatedb/slatedb"),
                 all: false,
+                review_file: None,
             })
         );
     }
@@ -852,6 +883,7 @@ mod tests {
                 session: "agavra/tuicr@main/worktree".to_string(),
                 input: None,
                 repo: PathBuf::from("."),
+                review_file: None,
                 comment_type: "issue".to_string(),
                 file: Some(PathBuf::from("src/main.rs")),
                 line: Some(42),
@@ -859,6 +891,38 @@ mod tests {
                 side: LineSideArg::Old,
                 username: None,
                 content: Some("Handle the empty case".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn should_parse_review_add_review_file() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "review",
+            "add",
+            "--session",
+            "review.md",
+            "--review-file",
+            "review.md",
+            "Check this",
+        ])
+        .expect("parse should succeed");
+
+        assert_eq!(
+            parsed.review_command,
+            Some(ReviewCommand::Add {
+                session: "review.md".to_string(),
+                input: None,
+                repo: PathBuf::from("."),
+                review_file: Some(PathBuf::from("review.md")),
+                comment_type: "note".to_string(),
+                file: None,
+                line: None,
+                end_line: None,
+                side: LineSideArg::New,
+                username: None,
+                content: Some("Check this".to_string()),
             })
         );
     }
@@ -884,6 +948,7 @@ mod tests {
                     r#"{"file":"src/main.rs","line":42,"side":"old","content":"note"}"#.to_string()
                 ),
                 repo: PathBuf::from("."),
+                review_file: None,
                 comment_type: "note".to_string(),
                 file: None,
                 line: None,
@@ -904,6 +969,7 @@ mod tests {
             Some(ReviewCommand::Comments {
                 session: "session.json".to_string(),
                 repo: PathBuf::from("."),
+                review_file: None,
             })
         );
     }
@@ -917,6 +983,7 @@ mod tests {
             Some(ReviewCommand::Comments {
                 session: "session.json".to_string(),
                 repo: PathBuf::from("."),
+                review_file: None,
             })
         );
     }

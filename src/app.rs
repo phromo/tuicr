@@ -1031,6 +1031,7 @@ pub struct App {
     pub session: ReviewSession,
     pub(crate) persisted_session_snapshot: ReviewSession,
     pub(crate) session_path: Option<PathBuf>,
+    pub(crate) review_file_path: Option<PathBuf>,
     pub(crate) session_file_state: Option<SessionFileState>,
     pub review_watch_interval: Option<Duration>,
     pub next_review_watch_at: Instant,
@@ -1905,6 +1906,7 @@ impl App {
             session,
             persisted_session_snapshot,
             session_path,
+            review_file_path: None,
             session_file_state,
             review_watch_interval: Some(Duration::from_millis(DEFAULT_REVIEW_WATCH_INTERVAL_MS)),
             next_review_watch_at: Instant::now()
@@ -2072,7 +2074,69 @@ impl App {
         self.dirty = false;
     }
 
+    pub fn attach_review_file(&mut self, path: &Path) -> Result<()> {
+        let path = path.to_path_buf();
+        self.review_file_path = Some(path.clone());
+        self.session_path = Some(path.clone());
+
+        if path.exists() {
+            let mut session = crate::persistence::markdown::load_session(&path)?;
+            let live_identity = self.session.clone();
+            session.repo_path = live_identity.repo_path;
+            session.branch_name = live_identity.branch_name;
+            session.base_commit = live_identity.base_commit;
+            session.diff_source = live_identity.diff_source;
+            session.commit_range = live_identity.commit_range;
+            session.pr_session_key = live_identity.pr_session_key;
+            let preserve_hunks = matches!(self.diff_source, DiffSource::PullRequest(_))
+                && session.commit_selection_range.is_some();
+            Self::register_diff_files(&mut session, &self.diff_files, preserve_hunks);
+            self.session = session.clone();
+            self.persisted_session_snapshot = session;
+            self.session_file_state = SessionFileState::from_path(&path).ok();
+            self.dirty = false;
+            self.sort_files_by_directory(true);
+            self.expand_all_dirs();
+            self.rebuild_annotations();
+        } else {
+            self.persisted_session_snapshot = self.session.clone();
+            self.session_file_state = None;
+        }
+
+        Ok(())
+    }
+
+    fn load_attached_review_file_session_or(&self, fallback: ReviewSession) -> ReviewSession {
+        let Some(path) = self.review_file_path.as_ref() else {
+            return fallback;
+        };
+        let Ok(mut loaded) = crate::persistence::markdown::load_session(path) else {
+            return fallback;
+        };
+
+        // The selected target defines the live identity. The markdown file may
+        // have been created while the selector was still open, before the user
+        // chose staged/unstaged/commit scope.
+        loaded.repo_path = fallback.repo_path;
+        loaded.branch_name = fallback.branch_name;
+        loaded.base_commit = fallback.base_commit;
+        loaded.diff_source = fallback.diff_source;
+        loaded.commit_range = fallback.commit_range;
+        loaded.pr_session_key = fallback.pr_session_key;
+        loaded
+    }
+
     pub fn ensure_ephemeral_session_file(&mut self) -> Result<Option<PathBuf>> {
+        if let Some(path) = self.review_file_path.clone() {
+            self.session_path = Some(path.clone());
+            if path.exists() {
+                self.session_file_state = SessionFileState::from_path(&path).ok();
+                return Ok(None);
+            }
+            let saved_path = self.save_current_session_merging_external()?;
+            return Ok(Some(saved_path));
+        }
+
         let path = match self.session_path.clone() {
             Some(path) => path,
             None => {
@@ -2098,6 +2162,11 @@ impl App {
     }
 
     pub fn cleanup_empty_ephemeral_sessions(&mut self) -> Result<usize> {
+        if self.review_file_path.is_some() {
+            self.ephemeral_session_paths.clear();
+            return Ok(0);
+        }
+
         let mut deleted = 0;
         for path in self.ephemeral_session_paths.clone() {
             if crate::persistence::storage::delete_session_if_empty(&path)? {
@@ -2122,6 +2191,12 @@ impl App {
     /// reopening starts clean, then quit. Reviewed markers are persisted
     /// eagerly, so the on-disk file is removed too.
     pub fn discard_session_and_quit(&mut self) {
+        if self.review_file_path.is_some() {
+            self.dirty = false;
+            self.should_quit = true;
+            return;
+        }
+
         let path = self
             .session_path
             .clone()
@@ -2138,6 +2213,25 @@ impl App {
     }
 
     pub fn save_current_session_merging_external(&mut self) -> Result<PathBuf> {
+        if let Some(path) = self.review_file_path.clone() {
+            let current = self.session.clone();
+            let base = self.persisted_session_snapshot.clone();
+            let persisted = if path.exists() {
+                Some(crate::persistence::markdown::load_session(&path)?)
+            } else {
+                None
+            };
+            let mut merged = current;
+            if let Some(latest) = persisted.as_ref() {
+                Self::merge_external_session_changes(&mut merged, &base, latest);
+            }
+            merged.updated_at = Utc::now();
+            crate::persistence::markdown::save_session(&path, &merged)?;
+            self.mark_session_saved(path.clone(), merged);
+            self.rebuild_annotations();
+            return Ok(path);
+        }
+
         let identity = self.session.clone();
         let current = self.session.clone();
         let base = self.persisted_session_snapshot.clone();
@@ -2184,15 +2278,20 @@ impl App {
     }
 
     pub fn reload_persisted_session_if_changed(&mut self, force: bool) -> Result<usize> {
-        let path = match self.session_path.clone() {
-            Some(path) => path,
-            None => match crate::persistence::storage::session_path(&self.session) {
-                Ok(path) => {
-                    self.session_path = Some(path.clone());
-                    path
-                }
-                Err(_) => return Ok(0),
-            },
+        let path = if let Some(path) = self.review_file_path.clone() {
+            self.session_path = Some(path.clone());
+            path
+        } else {
+            match self.session_path.clone() {
+                Some(path) => path,
+                None => match crate::persistence::storage::session_path(&self.session) {
+                    Ok(path) => {
+                        self.session_path = Some(path.clone());
+                        path
+                    }
+                    Err(_) => return Ok(0),
+                },
+            }
         };
 
         if !path.exists() {
@@ -2205,7 +2304,11 @@ impl App {
             return Ok(0);
         }
 
-        let latest = crate::persistence::storage::load_session(&path)?;
+        let latest = if self.review_file_path.is_some() {
+            crate::persistence::markdown::load_session(&path)?
+        } else {
+            crate::persistence::storage::load_session(&path)?
+        };
         let before_count = Self::comment_count(&self.session);
         let changed = Self::merge_external_session_changes(
             &mut self.session,
@@ -3906,8 +4009,10 @@ impl App {
             Err(e) => return Err(e),
         };
 
-        self.session =
-            Self::load_or_create_session(&self.vcs_info, SessionDiffSource::StagedAndUnstaged);
+        self.session = self.load_attached_review_file_session_or(Self::load_or_create_session(
+            &self.vcs_info,
+            SessionDiffSource::StagedAndUnstaged,
+        ));
         for file in &diff_files {
             self.session.add_diff_file(file);
         }
@@ -3943,7 +4048,10 @@ impl App {
             Err(e) => return Err(e),
         };
 
-        self.session = Self::load_or_create_session(&self.vcs_info, SessionDiffSource::Staged);
+        self.session = self.load_attached_review_file_session_or(Self::load_or_create_session(
+            &self.vcs_info,
+            SessionDiffSource::Staged,
+        ));
         for file in &diff_files {
             self.session.add_diff_file(file);
         }
@@ -3979,7 +4087,10 @@ impl App {
             Err(e) => return Err(e),
         };
 
-        self.session = Self::load_or_create_session(&self.vcs_info, SessionDiffSource::Unstaged);
+        self.session = self.load_attached_review_file_session_or(Self::load_or_create_session(
+            &self.vcs_info,
+            SessionDiffSource::Unstaged,
+        ));
         for file in &diff_files {
             self.session.add_diff_file(file);
         }
@@ -8673,7 +8784,7 @@ impl App {
             session.updated_at = chrono::Utc::now();
         }
 
-        self.session = session;
+        self.session = self.load_attached_review_file_session_or(session);
 
         // Add files to session
         for file in &diff_files {
@@ -8876,8 +8987,9 @@ impl App {
             Err(e) => return Err(e),
         };
 
-        self.session =
-            Self::load_or_create_staged_unstaged_and_commits_session(&self.vcs_info, &selected_ids);
+        self.session = self.load_attached_review_file_session_or(
+            Self::load_or_create_staged_unstaged_and_commits_session(&self.vcs_info, &selected_ids),
+        );
 
         for file in &diff_files {
             self.session.add_diff_file(file);

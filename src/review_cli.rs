@@ -11,6 +11,7 @@ use crate::config;
 use crate::error::{Result, TuicrError};
 use crate::model::comment::{self, CommentLifecycleState};
 use crate::model::{Comment, CommentType, LineRange, LineSide, ReviewSession};
+use crate::persistence::markdown;
 use crate::review_store::{
     AddCommentRequest, CommentTarget, ReviewStore, SessionRef, SessionSummary,
 };
@@ -23,11 +24,16 @@ pub fn run(command: ReviewCommand) -> Result<()> {
 
 fn run_with_writer(command: ReviewCommand, out: &mut impl Write) -> Result<()> {
     match command {
-        ReviewCommand::List { repo, all } => list_sessions(&repo, all, out),
+        ReviewCommand::List {
+            repo,
+            all,
+            review_file,
+        } => list_sessions(&repo, all, review_file.as_deref(), out),
         ReviewCommand::Add {
             session,
             input,
             repo,
+            review_file,
             comment_type,
             file,
             line,
@@ -38,6 +44,7 @@ fn run_with_writer(command: ReviewCommand, out: &mut impl Write) -> Result<()> {
         } => add_comment(
             &session,
             &repo,
+            review_file.as_deref(),
             AddCommentOptions {
                 input,
                 comment_type,
@@ -50,11 +57,35 @@ fn run_with_writer(command: ReviewCommand, out: &mut impl Write) -> Result<()> {
             },
             out,
         ),
-        ReviewCommand::Comments { session, repo } => show_comments(&session, &repo, out),
+        ReviewCommand::Comments {
+            session,
+            repo,
+            review_file,
+        } => show_comments(&session, &repo, review_file.as_deref(), out),
     }
 }
 
-fn list_sessions(repo: &Path, all: bool, out: &mut impl Write) -> Result<()> {
+fn list_sessions(
+    repo: &Path,
+    all: bool,
+    review_file: Option<&Path>,
+    out: &mut impl Write,
+) -> Result<()> {
+    if let Some(path) = review_file {
+        let output: Vec<_> = if path.exists() {
+            let session = markdown::load_session(path)?;
+            vec![SessionSummaryOutput::from_markdown(
+                path.to_path_buf(),
+                &session,
+            )]
+        } else {
+            Vec::new()
+        };
+        serde_json::to_writer_pretty(&mut *out, &output)?;
+        writeln!(out)?;
+        return Ok(());
+    }
+
     let store = ReviewStore::new();
     let summaries = if all {
         store.list_all_sessions()?
@@ -84,10 +115,13 @@ struct AddCommentOptions {
 fn add_comment(
     session: &str,
     repo: &Path,
+    review_file: Option<&Path>,
     options: AddCommentOptions,
     out: &mut impl Write,
 ) -> Result<()> {
-    let store = ReviewStore::new();
+    let store = review_file
+        .map(ReviewStore::with_review_file)
+        .unwrap_or_default();
     let session_ref = resolve_session_ref(&store, repo, session)?;
     let request_parts = build_add_request_parts(options)?;
     let target = request_parts.target;
@@ -324,8 +358,15 @@ fn line_side_arg_to_model(side: LineSideArg) -> LineSide {
     }
 }
 
-fn show_comments(session: &str, repo: &Path, out: &mut impl Write) -> Result<()> {
-    let store = ReviewStore::new();
+fn show_comments(
+    session: &str,
+    repo: &Path,
+    review_file: Option<&Path>,
+    out: &mut impl Write,
+) -> Result<()> {
+    let store = review_file
+        .map(ReviewStore::with_review_file)
+        .unwrap_or_default();
     let session_ref = resolve_session_ref(&store, repo, session)?;
     let session = store.get_review(&session_ref)?;
     let comments = collect_comments(&session);
@@ -336,7 +377,11 @@ fn show_comments(session: &str, repo: &Path, out: &mut impl Write) -> Result<()>
 
 fn resolve_session_ref(store: &ReviewStore, repo: &Path, session: &str) -> Result<SessionRef> {
     let direct_path = PathBuf::from(session);
-    if direct_path.exists() || direct_path.is_absolute() || session.ends_with(".json") {
+    if direct_path.exists()
+        || direct_path.is_absolute()
+        || session.ends_with(".json")
+        || session.ends_with(".md")
+    {
         return Ok(SessionRef::from_path(direct_path));
     }
 
@@ -536,6 +581,30 @@ impl From<SessionSummary> for SessionSummaryOutput {
             file_count: summary.file_count,
             anchor: summary.anchor,
             active: summary.active,
+        }
+    }
+}
+
+impl SessionSummaryOutput {
+    fn from_markdown(path: PathBuf, session: &ReviewSession) -> Self {
+        let slug = markdown::session_slug(session).unwrap_or_else(|| path.display().to_string());
+        Self {
+            slug,
+            path: path.display().to_string(),
+            kind: if session.pr_session_key.is_some() {
+                crate::review_store::SessionKind::Pr.id()
+            } else {
+                crate::review_store::SessionKind::Local.id()
+            },
+            updated_at: session.updated_at.to_rfc3339(),
+            comment_count: collect_comments(session).len(),
+            reviewed_count: session.reviewed_count(),
+            file_count: session.files.len(),
+            anchor: session
+                .branch_name
+                .clone()
+                .unwrap_or_else(|| session.base_commit.clone()),
+            active: false,
         }
     }
 }
@@ -857,9 +926,65 @@ mod tests {
         assert_eq!(comments[0].location, "src/main.rs:42");
         assert_eq!(comments[0].comment_type, "issue");
 
-        show_comments(&session_ref.path().display().to_string(), &repo, &mut out).unwrap();
+        show_comments(
+            &session_ref.path().display().to_string(),
+            &repo,
+            None,
+            &mut out,
+        )
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value[0]["comment_type"], "issue");
+        assert_eq!(value[0]["location"], "src/main.rs:42");
+        assert_eq!(value[0]["content"], "check this");
+    }
+
+    #[test]
+    fn should_list_add_and_show_comments_from_markdown_review_file() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let review_file = temp.path().join("review.md");
+        let store = ReviewStore::with_review_file(&review_file);
+        let session = test_session(repo.clone());
+        store.save_review(&session).unwrap();
+
+        let mut add_out = Vec::new();
+        run_with_writer(
+            ReviewCommand::Add {
+                session: review_file.display().to_string(),
+                input: None,
+                repo: repo.clone(),
+                review_file: Some(review_file.clone()),
+                comment_type: "issue".to_string(),
+                file: Some(PathBuf::from("src/main.rs")),
+                line: Some(42),
+                end_line: None,
+                side: LineSideArg::New,
+                username: None,
+                content: Some("check this".to_string()),
+            },
+            &mut add_out,
+        )
+        .unwrap();
+
+        let markdown = std::fs::read_to_string(&review_file).unwrap();
+        assert!(markdown.contains("## src/main.rs:42 (ISSUE, new)"));
+        assert!(markdown.contains("check this"));
+
+        let mut comments_out = Vec::new();
+        run_with_writer(
+            ReviewCommand::Comments {
+                session: review_file.display().to_string(),
+                repo,
+                review_file: Some(review_file),
+            },
+            &mut comments_out,
+        )
+        .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&comments_out).expect("comments JSON");
         assert_eq!(value[0]["comment_type"], "issue");
         assert_eq!(value[0]["location"], "src/main.rs:42");
         assert_eq!(value[0]["content"], "check this");
