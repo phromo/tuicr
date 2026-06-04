@@ -55,6 +55,9 @@ pub struct AppConfig {
     pub scroll_offset: Option<usize>,
     pub review_watch_interval_ms: Option<usize>,
     pub no_update_check: Option<bool>,
+    /// Command-mode commands to run after startup config is applied.
+    /// Entries may include or omit the leading ':'.
+    pub startup_commands: Option<Vec<String>>,
     /// Render single-file and pristine views in full-width mode by default.
     /// Pristine `--all-files` mode already defaults to true regardless of
     /// this setting. Defaults to false.
@@ -88,6 +91,7 @@ const KNOWN_KEYS: &[&str] = &[
     "scroll_offset",
     "review_watch_interval_ms",
     "no_update_check",
+    "startup_commands",
     "single_file_view",
     "username",
     "forge",
@@ -234,6 +238,41 @@ fn read_usize(table: &toml::Table, key: &str, warnings: &mut Vec<String>) -> Opt
     }
 }
 
+/// Read a list of non-empty strings from the table.
+fn read_string_list(
+    table: &toml::Table,
+    key: &str,
+    warnings: &mut Vec<String>,
+) -> Option<Vec<String>> {
+    let val = table.get(key)?;
+    let Some(values) = val.as_array() else {
+        warnings.push(format!(
+            "Warning: Config key '{key}' must be an array of strings; ignoring value"
+        ));
+        return None;
+    };
+
+    let mut out = Vec::new();
+    for (idx, value) in values.iter().enumerate() {
+        let Some(raw) = value.as_str() else {
+            warnings.push(format!(
+                "Warning: Config key '{key}[{idx}]' must be a string; ignoring entry"
+            ));
+            continue;
+        };
+        let command = raw.trim();
+        if command.is_empty() {
+            warnings.push(format!(
+                "Warning: Config key '{key}[{idx}]' cannot be empty; ignoring entry"
+            ));
+            continue;
+        }
+        out.push(command.to_string());
+    }
+
+    if out.is_empty() { None } else { Some(out) }
+}
+
 /// Read a string value constrained to a set of allowed values.
 fn read_enum(
     table: &toml::Table,
@@ -297,6 +336,7 @@ fn load_config_from_path(path: &Path) -> Result<ConfigLoadOutcome> {
         scroll_offset: read_usize(table, "scroll_offset", &mut warnings),
         review_watch_interval_ms: read_usize(table, "review_watch_interval_ms", &mut warnings),
         no_update_check: read_bool(table, "no_update_check", &mut warnings),
+        startup_commands: read_string_list(table, "startup_commands", &mut warnings),
         single_file_view: read_bool(table, "single_file_view", &mut warnings),
         username: read_string(table, "username", &mut warnings),
         forge: table
@@ -595,6 +635,53 @@ mod tests {
             Some("libgit2")
         );
         assert!(libgit2.warnings.is_empty());
+    }
+
+    #[test]
+    fn should_parse_startup_commands() {
+        let outcome = parse_config("startup_commands = [\":set nocommits\", \"set wrap\"]\n");
+
+        assert_eq!(
+            outcome
+                .config
+                .as_ref()
+                .and_then(|cfg| cfg.startup_commands.as_ref()),
+            Some(&vec![":set nocommits".to_string(), "set wrap".to_string()])
+        );
+        assert!(outcome.warnings.is_empty());
+    }
+
+    #[test]
+    fn should_warn_and_ignore_invalid_startup_commands_entries() {
+        let outcome = parse_config("startup_commands = [\":set nocommits\", 12, \"\"]\n");
+
+        assert_eq!(
+            outcome
+                .config
+                .as_ref()
+                .and_then(|cfg| cfg.startup_commands.as_ref()),
+            Some(&vec![":set nocommits".to_string()])
+        );
+        assert_eq!(
+            outcome.warnings,
+            vec![
+                "Warning: Config key 'startup_commands[1]' must be a string; ignoring entry",
+                "Warning: Config key 'startup_commands[2]' cannot be empty; ignoring entry",
+            ]
+        );
+    }
+
+    #[test]
+    fn should_warn_and_ignore_startup_commands_with_invalid_type() {
+        let outcome = parse_config("startup_commands = \"set nocommits\"\n");
+
+        assert_eq!(outcome.config, Some(AppConfig::default()));
+        assert_eq!(
+            outcome.warnings,
+            vec![
+                "Warning: Config key 'startup_commands' must be an array of strings; ignoring value"
+            ]
+        );
     }
 
     #[test]

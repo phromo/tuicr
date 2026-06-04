@@ -118,6 +118,21 @@ enum CommandKind {
     Comments(PrCommentsVisibility),
 }
 
+impl CommandKind {
+    fn is_startup_safe(self) -> bool {
+        matches!(
+            self,
+            CommandKind::SetWrap
+                | CommandKind::ToggleWrap
+                | CommandKind::SetCommitsVisible(_)
+                | CommandKind::ToggleCommits
+                | CommandKind::Diff
+                | CommandKind::Focus
+                | CommandKind::Comments(_)
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandAfterDispatch {
     ExitCommandMode,
@@ -533,6 +548,27 @@ pub fn handle_command_action(app: &mut App, action: Action) {
 
 fn command_spec_for(cmd: &str) -> Option<&'static CommandSpec> {
     COMMAND_SPECS.iter().find(|spec| spec.names.contains(&cmd))
+}
+
+/// Run a config-specified command after the TUI model has been initialized.
+/// Only view/config commands are accepted here; lifecycle, export, mutation,
+/// submit, editor, reload, and selector commands remain interactive-only.
+pub fn run_startup_command(app: &mut App, raw: &str) -> std::result::Result<(), String> {
+    let cmd = raw.trim().trim_start_matches(':').trim();
+    if cmd.is_empty() {
+        return Ok(());
+    }
+    let Some(spec) = command_spec_for(cmd) else {
+        return Err(format!("Unknown startup command: {raw}"));
+    };
+    if !spec.kind.is_startup_safe() {
+        return Err(format!("Startup command not allowed: :{cmd}"));
+    }
+    let previous_message = app.message.clone();
+    dispatch_command(app, spec.kind);
+    app.message = previous_message;
+    app.exit_command_mode();
+    Ok(())
 }
 
 /// CommandCompleter computes command-buffer replacements without mutating App.

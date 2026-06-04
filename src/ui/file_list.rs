@@ -148,6 +148,9 @@ pub(super) fn render_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
                                 styles::file_status_style(&app.theme, status),
                             ));
                         }
+                        if app.is_file_line_count_loading(*file_idx) {
+                            spans.push(Span::styled("\u{2026} ", styles::dim_style(&app.theme)));
+                        }
                         spans.push(Span::raw(filename.to_string()));
                         Line::from(spans)
                     }

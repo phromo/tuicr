@@ -362,6 +362,24 @@ pub fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(content, Style::default().fg(theme.fg_dim)),
             width,
         )
+    } else if let Some((done, total)) = app.eof_line_count_progress() {
+        let width_units = 10usize;
+        let filled = if total == 0 {
+            0
+        } else {
+            done.saturating_mul(width_units) / total
+        };
+        let bar = format!(
+            "{}{}",
+            "#".repeat(filled),
+            "-".repeat(width_units.saturating_sub(filled))
+        );
+        let content = format!(" context {done}/{total} [{bar}] ");
+        let width = content.chars().count();
+        (
+            Span::styled(content, Style::default().fg(theme.fg_dim)),
+            width,
+        )
     } else if app.dirty {
         let content = " \u{2022} modified ".to_string();
         let width = content.chars().count();

@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
@@ -909,6 +911,119 @@ enum StoredCommentLocation {
     Line { path: PathBuf, line: u32 },
 }
 
+#[derive(Debug, Clone)]
+struct EofLineCountJob {
+    file_idx: usize,
+    path: PathBuf,
+    status: FileStatus,
+}
+
+#[derive(Debug)]
+struct EofLineCountEvent {
+    file_idx: usize,
+    count: Option<u32>,
+}
+
+fn eof_line_count_from_snapshot(
+    root_path: &Path,
+    vcs_type: VcsType,
+    file_path: &Path,
+    file_status: FileStatus,
+    ref_commit: Option<&str>,
+) -> Result<u32> {
+    let content = if let Some(commit) = ref_commit {
+        read_file_at_revision(root_path, vcs_type, commit, file_path)?
+    } else if file_status == FileStatus::Deleted {
+        read_deleted_file_baseline(root_path, vcs_type, file_path)?
+    } else {
+        std::fs::read_to_string(root_path.join(file_path))?
+    };
+    Ok(content.lines().count() as u32)
+}
+
+fn read_file_at_revision(
+    root_path: &Path,
+    vcs_type: VcsType,
+    revision: &str,
+    file_path: &Path,
+) -> Result<String> {
+    let path = file_path.to_string_lossy();
+    match vcs_type {
+        VcsType::Git => run_line_count_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(root_path)
+                .arg("show")
+                .arg(format!("{revision}:{path}")),
+        ),
+        VcsType::Jujutsu => run_line_count_command(
+            Command::new("jj")
+                .current_dir(root_path)
+                .arg("file")
+                .arg("show")
+                .arg("-r")
+                .arg(revision)
+                .arg(path.as_ref()),
+        ),
+        VcsType::Mercurial => run_line_count_command(
+            Command::new("hg")
+                .current_dir(root_path)
+                .arg("cat")
+                .arg("-r")
+                .arg(revision)
+                .arg(path.as_ref()),
+        ),
+        VcsType::File => Ok(std::fs::read_to_string(root_path.join(file_path))?),
+    }
+}
+
+fn read_deleted_file_baseline(
+    root_path: &Path,
+    vcs_type: VcsType,
+    file_path: &Path,
+) -> Result<String> {
+    let path = file_path.to_string_lossy();
+    match vcs_type {
+        VcsType::Git => run_line_count_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(root_path)
+                .arg("show")
+                .arg(format!("HEAD:{path}")),
+        ),
+        VcsType::Jujutsu => run_line_count_command(
+            Command::new("jj")
+                .current_dir(root_path)
+                .arg("file")
+                .arg("show")
+                .arg("-r")
+                .arg("@-")
+                .arg(path.as_ref()),
+        ),
+        VcsType::Mercurial => run_line_count_command(
+            Command::new("hg")
+                .current_dir(root_path)
+                .arg("cat")
+                .arg("-r")
+                .arg(".")
+                .arg(path.as_ref()),
+        ),
+        VcsType::File => Ok(std::fs::read_to_string(root_path.join(file_path))?),
+    }
+}
+
+fn run_line_count_command(command: &mut Command) -> Result<String> {
+    let output = command
+        .output()
+        .map_err(|err| TuicrError::VcsCommand(format!("line-count command failed: {err}")))?;
+    if !output.status.success() {
+        return Err(TuicrError::VcsCommand(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 pub struct App {
     pub theme: Theme,
     pub vcs: Box<dyn VcsBackend>,
@@ -1112,6 +1227,14 @@ pub struct App {
     pub expanded_bottom: HashMap<GapId, Vec<DiffLine>>,
     /// Cached file line counts (keyed by file_idx) to avoid repeated disk reads
     pub file_line_count_cache: HashMap<usize, u32>,
+    /// File indices whose EOF line count is being resolved in the background.
+    pub eof_line_count_pending: HashSet<usize>,
+    /// Total number of EOF line counts requested for the current diff.
+    pub eof_line_count_total: usize,
+    /// Number of EOF line count jobs that have completed successfully or failed.
+    pub eof_line_count_finished: usize,
+    /// Background-thread channel that delivers lazy EOF line count results.
+    eof_line_count_rx: Option<Receiver<EofLineCountEvent>>,
     /// Cached annotations describing what each rendered line represents
     pub line_annotations: Vec<AnnotatedLine>,
     /// Output to stdout instead of clipboard when exporting
@@ -1873,6 +1996,10 @@ impl App {
             expanded_top: HashMap::new(),
             expanded_bottom: HashMap::new(),
             file_line_count_cache: HashMap::new(),
+            eof_line_count_pending: HashSet::new(),
+            eof_line_count_total: 0,
+            eof_line_count_finished: 0,
+            eof_line_count_rx: None,
             line_annotations: Vec::new(),
             output_to_stdout,
             pending_stdout_output: None,
@@ -1898,7 +2025,7 @@ impl App {
         }
         app.sort_files_by_directory(true);
         app.expand_all_dirs();
-        app.populate_file_line_count_cache();
+        app.start_eof_line_count_loader();
         app.rebuild_annotations();
         app.detect_forge_repository();
         Ok(app)
@@ -2808,6 +2935,7 @@ impl App {
         Self::register_diff_files(&mut self.session, &self.diff_files, preserve_hunks);
 
         self.sort_files_by_directory(true);
+        self.start_eof_line_count_loader();
         self.expand_all_dirs();
         self.rebuild_annotations();
 
@@ -3008,6 +3136,7 @@ impl App {
             self.session.add_diff_file(file);
         }
         self.sort_files_by_directory(true);
+        self.start_eof_line_count_loader();
         self.expand_all_dirs();
         self.rebuild_annotations();
         if let Some(anchor) = anchor {
@@ -3157,6 +3286,7 @@ impl App {
         // PR session, so registration must not prune them.
         Self::register_diff_files(&mut self.session, &self.diff_files, true);
         self.sort_files_by_directory(true);
+        self.start_eof_line_count_loader();
         self.expand_all_dirs();
         self.rebuild_annotations();
 
@@ -3286,6 +3416,7 @@ impl App {
                 self.session.add_diff_file(file);
             }
             self.sort_files_by_directory(true);
+            self.start_eof_line_count_loader();
             self.expand_all_dirs();
             self.rebuild_annotations();
             self.refetch_pr_threads();
@@ -3365,6 +3496,7 @@ impl App {
                 self.session.add_diff_file(file);
             }
             self.sort_files_by_directory(true);
+            self.start_eof_line_count_loader();
             self.expand_all_dirs();
             self.rebuild_annotations();
         }
@@ -3788,6 +3920,7 @@ impl App {
         self.file_list_state = FileListState::default();
         self.clear_expanded_gaps();
         self.sort_files_by_directory(true);
+        self.start_eof_line_count_loader();
         self.expand_all_dirs();
         self.rebuild_annotations();
 
@@ -3823,6 +3956,7 @@ impl App {
         self.file_list_state = FileListState::default();
         self.clear_expanded_gaps();
         self.sort_files_by_directory(true);
+        self.start_eof_line_count_loader();
         self.expand_all_dirs();
         self.rebuild_annotations();
 
@@ -3858,6 +3992,7 @@ impl App {
         self.file_list_state = FileListState::default();
         self.clear_expanded_gaps();
         self.sort_files_by_directory(true);
+        self.start_eof_line_count_loader();
         self.expand_all_dirs();
         self.rebuild_annotations();
 
@@ -3942,7 +4077,7 @@ impl App {
         self.clear_expanded_gaps();
 
         self.sort_files_by_directory(false);
-        self.populate_file_line_count_cache();
+        self.start_eof_line_count_loader();
         self.expand_all_dirs();
 
         if self.diff_files.is_empty() {
@@ -4027,6 +4162,7 @@ impl App {
             self.diff_state = DiffState::default();
             self.file_list_state = FileListState::default();
             self.clear_expanded_gaps();
+            self.start_eof_line_count_loader();
             self.rebuild_annotations();
         }
     }
@@ -8867,6 +9003,12 @@ impl App {
     }
 
     /// Get the line boundaries (start_line, end_line) of a gap.
+    fn is_eof_gap(&self, gap_id: &GapId) -> bool {
+        self.diff_files
+            .get(gap_id.file_idx)
+            .is_some_and(|file| gap_id.hunk_idx == file.hunks.len())
+    }
+
     fn gap_boundaries(&self, gap_id: &GapId) -> Option<(u32, u32)> {
         let file = self.diff_files.get(gap_id.file_idx)?;
 
@@ -8921,8 +9063,15 @@ impl App {
         direction: ExpandDirection,
         limit: Option<usize>,
     ) -> Result<()> {
-        // Ensure file line count is cached for EOF gaps
-        self.ensure_file_line_count_cached(gap_id.file_idx);
+        // EOF gaps need the asynchronously loaded final line count. Until it
+        // arrives, the expander is hidden; this guard covers stale clicks.
+        if self.is_eof_gap(&gap_id) && !self.file_line_count_cache.contains_key(&gap_id.file_idx) {
+            if self.is_file_line_count_loading(gap_id.file_idx) {
+                self.set_warning("End-of-file context is still loading");
+                return Ok(());
+            }
+            self.ensure_file_line_count_cached(gap_id.file_idx);
+        }
 
         let (gap_start, gap_end) = self
             .gap_boundaries(&gap_id)
@@ -9061,6 +9210,10 @@ impl App {
         self.expanded_top.clear();
         self.expanded_bottom.clear();
         self.file_line_count_cache.clear();
+        self.eof_line_count_pending.clear();
+        self.eof_line_count_total = 0;
+        self.eof_line_count_finished = 0;
+        self.eof_line_count_rx = None;
     }
 
     fn eof_gap_enabled(&self) -> bool {
@@ -9077,6 +9230,9 @@ impl App {
     /// Ensure the file line count cache is populated for a given file.
     fn ensure_file_line_count_cached(&mut self, file_idx: usize) {
         if !self.eof_gap_enabled() || self.file_line_count_cache.contains_key(&file_idx) {
+            return;
+        }
+        if self.eof_line_count_pending.contains(&file_idx) {
             return;
         }
         if let Some(file) = self.diff_files.get(file_idx) {
@@ -9106,13 +9262,130 @@ impl App {
         }
     }
 
+    fn collect_eof_line_count_jobs(&self) -> Vec<EofLineCountJob> {
+        if !self.eof_gap_enabled() {
+            return Vec::new();
+        }
+        self.diff_files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| !file.hunks.is_empty() && file.status != FileStatus::Deleted)
+            .map(|(file_idx, file)| EofLineCountJob {
+                file_idx,
+                path: file.display_path().clone(),
+                status: file.status,
+            })
+            .collect()
+    }
+
+    fn start_eof_line_count_loader(&mut self) {
+        self.file_line_count_cache.clear();
+        self.eof_line_count_pending.clear();
+        self.eof_line_count_total = 0;
+        self.eof_line_count_finished = 0;
+        self.eof_line_count_rx = None;
+
+        let jobs = self.collect_eof_line_count_jobs();
+        if jobs.is_empty() {
+            return;
+        }
+
+        self.eof_line_count_total = jobs.len();
+        self.eof_line_count_pending = jobs.iter().map(|job| job.file_idx).collect();
+        let root_path = self.vcs_info.root_path.clone();
+        let vcs_type = self.vcs_info.vcs_type;
+        let ref_commit = self.ref_commit().map(str::to_string);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for job in jobs {
+                let count = eof_line_count_from_snapshot(
+                    &root_path,
+                    vcs_type,
+                    &job.path,
+                    job.status,
+                    ref_commit.as_deref(),
+                )
+                .ok();
+                if tx
+                    .send(EofLineCountEvent {
+                        file_idx: job.file_idx,
+                        count,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        self.eof_line_count_rx = Some(rx);
+    }
+
+    pub fn poll_eof_line_count_events(&mut self) {
+        let Some(rx) = self.eof_line_count_rx.take() else {
+            return;
+        };
+
+        let mut changed = false;
+        let mut disconnected = false;
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    if self.eof_line_count_pending.remove(&event.file_idx) {
+                        self.eof_line_count_finished += 1;
+                    }
+                    if let Some(count) = event.count {
+                        self.file_line_count_cache.insert(event.file_idx, count);
+                        changed = true;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+
+        if disconnected {
+            self.eof_line_count_pending.clear();
+            self.eof_line_count_finished = self.eof_line_count_total;
+        }
+
+        if disconnected || self.eof_line_count_pending.is_empty() {
+            self.eof_line_count_rx = None;
+        } else {
+            self.eof_line_count_rx = Some(rx);
+        }
+
+        if changed {
+            self.rebuild_annotations();
+        }
+    }
+
+    pub fn eof_line_count_progress(&self) -> Option<(usize, usize)> {
+        if self.eof_line_count_total == 0
+            || self.eof_line_count_finished >= self.eof_line_count_total
+        {
+            None
+        } else {
+            Some((self.eof_line_count_finished, self.eof_line_count_total))
+        }
+    }
+
+    pub fn is_file_line_count_loading(&self, file_idx: usize) -> bool {
+        self.eof_line_count_pending.contains(&file_idx)
+    }
+
     /// Rebuild the line annotations cache. Call this when:
     /// - Diff files change (load/reload)
     /// - Expansion state changes (expand/collapse gap)
     /// - Comments are added/removed
     /// - Diff view mode changes
     pub fn rebuild_annotations(&mut self) {
-        if self.file_line_count_cache.is_empty() {
+        if self.file_line_count_cache.is_empty()
+            && self.eof_line_count_rx.is_none()
+            && self.eof_line_count_total == 0
+        {
             self.populate_file_line_count_cache();
         }
 
@@ -10385,6 +10658,31 @@ mod target_selector_tests {
 
         app.cycle_comment_type();
         assert_eq!(app.comment_type.id(), "note");
+    }
+
+    #[test]
+    fn startup_command_should_hide_commit_selector_without_replacing_message() {
+        let mut app = build_app();
+        app.show_commit_selector = true;
+        app.set_message("keep this");
+
+        crate::handler::run_startup_command(&mut app, ":set nocommits").unwrap();
+
+        assert!(!app.show_commit_selector);
+        assert_eq!(
+            app.message.as_ref().map(|message| message.content.as_str()),
+            Some("keep this")
+        );
+    }
+
+    #[test]
+    fn startup_command_should_reject_quit() {
+        let mut app = build_app();
+
+        let err = crate::handler::run_startup_command(&mut app, "quit").unwrap_err();
+
+        assert_eq!(err, "Startup command not allowed: :quit");
+        assert!(!app.should_quit);
     }
 
     fn dummy_commit(id: &str) -> CommitInfo {
@@ -12707,7 +13005,7 @@ mod expand_gap_tests {
             SessionDiffSource::WorkingTree,
         );
 
-        App::build(
+        let mut app = App::build(
             Box::new(MockVcs {
                 info: vcs_info.clone(),
                 total_lines,
@@ -12724,7 +13022,16 @@ mod expand_gap_tests {
             None,
             None,
         )
-        .expect("failed to build test app")
+        .expect("failed to build test app");
+        app.eof_line_count_pending.clear();
+        app.eof_line_count_total = 0;
+        app.eof_line_count_finished = 0;
+        app.eof_line_count_rx = None;
+        app.file_line_count_cache = (0..app.diff_files.len())
+            .map(|file_idx| (file_idx, total_lines))
+            .collect();
+        app.rebuild_annotations();
+        app
     }
 
     fn make_file_with_hunks(path: &str, hunks: Vec<DiffHunk>) -> DiffFile {

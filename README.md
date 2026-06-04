@@ -181,6 +181,7 @@ appearance = "system"        # or "dark" / "light"
 mouse = true
 leader = ";"                  # configurable prefix for leader shortcuts
 review_watch_interval_ms = 1000 # set to 0 to disable persisted-review polling
+startup_commands = ["set nocommits"] # run safe :commands after startup
 
 [[comment_types]]
 id = "issue"

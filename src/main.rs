@@ -273,6 +273,13 @@ fn main() -> anyhow::Result<()> {
         if let Some(interval_ms) = cfg.review_watch_interval_ms {
             app.set_review_watch_interval_ms(interval_ms as u64);
         }
+        if let Some(commands) = cfg.startup_commands.as_ref() {
+            for command in commands {
+                if let Err(err) = handler::run_startup_command(&mut app, command) {
+                    startup_warnings.push(err);
+                }
+            }
+        }
     }
 
     // On narrow terminals, start with only the diff panel visible.
@@ -325,6 +332,7 @@ fn main() -> anyhow::Result<()> {
         app.poll_pr_range_reload_events();
         app.poll_pr_threads_events();
         app.poll_pr_submit_events();
+        app.poll_eof_line_count_events();
         app.poll_persisted_session_changes();
 
         // Render. Bracket the frame in a synchronized-output pair
