@@ -6,6 +6,10 @@
 [![License](https://img.shields.io/crates/l/tuicr)](./LICENSE)
 [![Website](https://img.shields.io/badge/website-tuicr.dev-green)](https://tuicr.dev)
 
+> [!NOTE]
+> This is the `phromo` fork of tuicr. Fork-specific changes are tracked in
+> [CHANGELOG-FORK.md](./CHANGELOG-FORK.md).
+
 ![demo](./public/tuicr-demo.gif)
 
 > [!TIP]
@@ -151,8 +155,8 @@ tuicr review add --review-file review.md --session review.md "Check this"
 tuicr review comments --review-file review.md --session review.md
 ```
 
-The markdown file contains human-readable comment records plus hidden tuicr
-state needed to restore PR/session metadata losslessly.
+The markdown file contains human-readable comment records plus YAML frontmatter
+with compact tuicr state needed to restore PR/session metadata losslessly.
 
 ## Library API
 

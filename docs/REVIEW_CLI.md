@@ -84,9 +84,10 @@ tuicr review comments --review-file review.md --session review.md
 
 The file is human-readable markdown. Comment records use headings similar to
 revdiff output, for example `## src/main.rs:42 (ISSUE, new)`, followed by the
-comment body. A hidden tuicr state block preserves metadata that does not fit
+comment body. YAML frontmatter stores compact tuicr state that does not fit
 cleanly in headings, such as PR identity, comment lifecycle, reviewed hunks,
-and session settings.
+and session settings. Nested JSON containers in that state are kept on one line
+when they fit within 100 columns.
 
 ## Add Comments
 
